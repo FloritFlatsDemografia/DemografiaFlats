@@ -1,35 +1,32 @@
-import pandas as pd
 import streamlit as st
+import pandas as pd
 
 
 def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
-    d = df.copy()
+    """
+    Filtros marketing (Pais/Provincia/Idioma/Portal).
+    """
+    st.sidebar.header("Filtros")
 
-    st.sidebar.subheader("Filtros")
+    def _multiselect(label, col):
+        if col not in df.columns:
+            return []
+        opts = sorted([x for x in df[col].dropna().unique().tolist() if str(x).strip() != ""])
+        return st.sidebar.multiselect(label, opts)
 
-    # Fecha
-    if "Fecha entrada" in d.columns and pd.api.types.is_datetime64_any_dtype(d["Fecha entrada"]):
-        min_dt = d["Fecha entrada"].min()
-        max_dt = d["Fecha entrada"].max()
-        if pd.notna(min_dt) and pd.notna(max_dt):
-            start, end = st.sidebar.date_input(
-                "Rango de fechas (Fecha entrada)",
-                value=(min_dt.date(), max_dt.date()),
-            )
-            d = d[(d["Fecha entrada"].dt.date >= start) & (d["Fecha entrada"].dt.date <= end)]
+    sel_pais = _multiselect("País", "Pais")
+    sel_prov = _multiselect("Provincia", "Provincia")
+    sel_idioma = _multiselect("Idioma", "Idioma")
+    sel_portal = _multiselect("Portal", "Portal")
 
-    def multiselect(col: str, label: str):
-        if col in d.columns:
-            opts = sorted([x for x in d[col].dropna().unique().tolist() if str(x).strip() != ""])
-            sel = st.sidebar.multiselect(label, opts)
-            if sel:
-                return d[d[col].isin(sel)]
-        return d
+    out = df.copy()
+    if sel_pais:
+        out = out[out["Pais"].isin(sel_pais)]
+    if sel_prov:
+        out = out[out["Provincia"].isin(sel_prov)]
+    if sel_idioma:
+        out = out[out["Idioma"].isin(sel_idioma)]
+    if sel_portal:
+        out = out[out["Portal"].isin(sel_portal)]
 
-    d = multiselect("País", "País")
-    d = multiselect("Provincia", "Provincia")
-    d = multiselect("Idioma", "Idioma")
-    d = multiselect("Portal", "Portal")
-    d = multiselect("Alojamiento", "Alojamiento")
-
-    return d
+    return out
