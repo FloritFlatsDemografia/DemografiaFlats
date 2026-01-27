@@ -1,30 +1,11 @@
-import streamlit as st
 import pandas as pd
+import streamlit as st
 import plotly.express as px
-import re
-import unicodedata
 
 
-def _norm(s: str) -> str:
-    s = str(s).strip().lower()
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(ch for ch in s if not unicodedata.combining(ch))
-    s = re.sub(r"\s+", " ", s)
-    return s
-
-
-def _find_col(df: pd.DataFrame, candidates_regex: list[str]) -> str | None:
-    cols = list(df.columns)
-    norm_map = {c: _norm(c) for c in cols}
-    for c in cols:
-        nc = norm_map[c]
-        for pat in candidates_regex:
-            if re.search(pat, nc):
-                return c
-    return None
-
-
-def _top(df: pd.DataFrame, col: str, n: int = 15) -> pd.DataFrame:
+def _top_count(df: pd.DataFrame, col: str, n=15) -> pd.DataFrame:
+    if col not in df.columns:
+        return pd.DataFrame({col: [], "Reservas": []})
     s = df[col].replace("", pd.NA).dropna()
     if s.empty:
         return pd.DataFrame({col: [], "Reservas": []})
@@ -33,79 +14,81 @@ def _top(df: pd.DataFrame, col: str, n: int = 15) -> pd.DataFrame:
     return t
 
 
+def _top_sum(df: pd.DataFrame, group_col: str, value_col: str, n=15) -> pd.DataFrame:
+    if group_col not in df.columns or value_col not in df.columns:
+        return pd.DataFrame({group_col: [], value_col: []})
+    x = df[[group_col, value_col]].dropna()
+    if x.empty:
+        return pd.DataFrame({group_col: [], value_col: []})
+    t = x.groupby(group_col, as_index=False)[value_col].sum().sort_values(value_col, ascending=False).head(n)
+    return t
+
+
 def render_mercados(df: pd.DataFrame):
     st.subheader("Mercados (Marketing)")
 
-    # --- KPIs (si existen) ---
-    # Reservas = filas
+    # KPIs
     reservas = len(df)
-
-    ingresos = None
-    noches = None
-    adr = None
-
-    if "Ingresos" in df.columns:
-        ingresos = pd.to_numeric(df["Ingresos"], errors="coerce").fillna(0).sum()
-    if "Noches" in df.columns:
-        noches = pd.to_numeric(df["Noches"], errors="coerce").fillna(0).sum()
-    if ingresos is not None and noches and noches > 0:
-        adr = ingresos / noches
+    ingresos = pd.to_numeric(df["Ingreso"], errors="coerce").sum() if "Ingreso" in df.columns else None
+    noches = pd.to_numeric(df["Noches"], errors="coerce").sum() if "Noches" in df.columns else None
+    adr = (ingresos / noches) if (ingresos is not None and noches and noches > 0) else None
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Reservas", f"{reservas:,}".replace(",", "."))
-    c2.metric("Ingresos", "—" if ingresos is None else f"{ingresos:,.0f} €".replace(",", "X").replace(".", ",").replace("X", "."))
-    c3.metric("Noches", "—" if noches is None else f"{int(noches):,}".replace(",", "."))
-    c4.metric("ADR", "—" if adr is None else f"{adr:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
+    c2.metric("Ingresos", f"{ingresos:,.0f} €".replace(",", "X").replace(".", ",").replace("X", ".") if ingresos is not None else "—")
+    c3.metric("Noches", f"{noches:,.0f}".replace(",", ".") if noches is not None else "—")
+    c4.metric("ADR", f"{adr:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".") if adr is not None else "—")
 
     st.divider()
 
-    # --- Detectar columnas de mercado (muy robusto) ---
-    col_pais = _find_col(df, [r"\bpais\b", r"\bcountry\b", r"ocupante:.*pais"])
-    col_prov = _find_col(df, [r"\bprovincia\b", r"state|region", r"ocupante:.*prov"])
-    col_idioma = _find_col(df, [r"\bidioma\b", r"\blanguage\b", r"ocupante:.*idioma"])
+    # Gráficos: Reservas
+    g1, g2, g3 = st.columns(3)
 
-    if not col_pais and not col_prov and not col_idioma:
-        st.info(
-            "No encuentro columnas de **País / Provincia / Idioma** en el dataframe que llega a este dashboard.\n\n"
-            "Esto suele pasar si estás visualizando solo el **LISTADO_RESERVAS** (que trae fechas/ingresos/noches) "
-            "pero no el archivo **LISTA_RESERVAS** (que suele traer País/Provincia/Idioma/Portal)."
-        )
-        st.caption("Columnas detectadas en este archivo (primeras 25):")
-        st.write(list(df.columns)[:25])
-        return
+    with g1:
+        st.caption("Top País (Reservas)")
+        tp = _top_count(df, "País", 15)
+        if tp.empty:
+            st.info("No hay datos de País.")
+        else:
+            st.plotly_chart(px.bar(tp, x="Reservas", y="País", orientation="h"), use_container_width=True)
 
-    a, b, c = st.columns(3)
+    with g2:
+        st.caption("Top Provincia (Reservas)")
+        tv = _top_count(df, "Provincia", 15)
+        if tv.empty:
+            st.info("No hay datos de Provincia.")
+        else:
+            st.plotly_chart(px.bar(tv, x="Reservas", y="Provincia", orientation="h"), use_container_width=True)
 
-    if col_pais:
-        with a:
-            st.caption("Top País (Reservas)")
-            tp = _top(df, col_pais, 15)
-            st.plotly_chart(px.bar(tp, x="Reservas", y=col_pais, orientation="h"), use_container_width=True)
-    else:
-        with a:
-            st.caption("Top País (Reservas)")
-            st.warning("No hay columna de País en este archivo.")
+    with g3:
+        st.caption("Top Idioma (Reservas)")
+        ti = _top_count(df, "Idioma", 15)
+        if ti.empty:
+            st.info("No hay datos de Idioma.")
+        else:
+            st.plotly_chart(px.bar(ti, x="Reservas", y="Idioma", orientation="h"), use_container_width=True)
 
-    if col_prov:
-        with b:
-            st.caption("Top Provincia (Reservas)")
-            tv = _top(df, col_prov, 15)
-            st.plotly_chart(px.bar(tv, x="Reservas", y=col_prov, orientation="h"), use_container_width=True)
-    else:
-        with b:
-            st.caption("Top Provincia (Reservas)")
-            st.warning("No hay columna de Provincia en este archivo.")
+    st.divider()
 
-    if col_idioma:
-        with c:
-            st.caption("Top Idioma (Reservas)")
-            ti = _top(df, col_idioma, 15)
-            st.plotly_chart(px.bar(ti, x="Reservas", y=col_idioma, orientation="h"), use_container_width=True)
-    else:
-        with c:
-            st.caption("Top Idioma (Reservas)")
-            st.warning("No hay columna de Idioma en este archivo.")
+    # Gráficos: Dinero
+    h1, h2 = st.columns(2)
+
+    with h1:
+        st.caption("Top País (Ingresos)")
+        ts = _top_sum(df, "País", "Ingreso", 15)
+        if ts.empty:
+            st.info("No hay ingresos por País.")
+        else:
+            st.plotly_chart(px.bar(ts, x="Ingreso", y="País", orientation="h"), use_container_width=True)
+
+    with h2:
+        st.caption("Ingresos por Portal")
+        tp2 = _top_sum(df, "Portal", "Ingreso", 12)
+        if tp2.empty:
+            st.info("No hay ingresos por Portal.")
+        else:
+            st.plotly_chart(px.bar(tp2, x="Ingreso", y="Portal", orientation="h"), use_container_width=True)
 
     st.divider()
     st.caption("Muestra de datos (post-filtro)")
-    st.dataframe(df.head(200))
+    st.dataframe(df.head(300), use_container_width=True)
