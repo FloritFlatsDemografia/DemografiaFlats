@@ -4,50 +4,40 @@ import pandas as pd
 def clean_listado_reservas(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    # ─────────────────────────
-    # NORMALIZAR NOMBRES
-    # ─────────────────────────
-    df.columns = (
-        df.columns
-        .str.strip()
-        .str.lower()
-        .str.replace(" ", "_")
-        .str.replace("€", "", regex=False)
-        .str.replace("â‚¬", "", regex=False)
-    )
+    # Normalizar nombres
+    df.columns = df.columns.str.strip()
 
-    # ─────────────────────────
-    # INGRESOS (columna M)
-    # ─────────────────────────
-    ingreso_candidates = [
-        c for c in df.columns
-        if "total_reserva" in c or "importe" in c or "ingreso" in c
-    ]
+    # Fechas
+    df["Fecha entrada"] = pd.to_datetime(df["Fecha entrada"], errors="coerce", dayfirst=True)
+    df["Fecha salida"] = pd.to_datetime(df["Fecha salida"], errors="coerce", dayfirst=True)
 
-    if ingreso_candidates:
-        col_ingreso = ingreso_candidates[0]
-        df["ingreso"] = (
-            df[col_ingreso]
-            .astype(str)
-            .str.replace(",", ".", regex=False)
-            .str.replace("€", "", regex=False)
-            .str.strip()
-        )
-        df["ingreso"] = pd.to_numeric(df["ingreso"], errors="coerce")
+    # Noches
+    df["Noches"] = (df["Fecha salida"] - df["Fecha entrada"]).dt.days
+    df["Noches"] = df["Noches"].clip(lower=0)
+
+    # Ingresos (columna M)
+    ingreso_col = None
+    for c in df.columns:
+        if "total" in c.lower() and "reserva" in c.lower():
+            ingreso_col = c
+            break
+
+    if ingreso_col:
+        df["Ingresos"] = pd.to_numeric(df[ingreso_col], errors="coerce")
     else:
-        df["ingreso"] = pd.NA
+        df["Ingresos"] = 0
 
-    # ─────────────────────────
-    # FECHAS
-    # ─────────────────────────
-    for col in ["fecha_entrada", "fecha_salida"]:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
+    # ADR
+    df["ADR"] = df["Ingresos"] / df["Noches"]
+    df["ADR"] = df["ADR"].replace([float("inf"), -float("inf")], 0)
 
-    # ─────────────────────────
-    # NOCHES
-    # ─────────────────────────
-    if "fecha_entrada" in df.columns and "fecha_salida" in df.columns:
-        df["noches"] = (df["fecha_salida"] - df["fecha_entrada"]).dt.days
-    else:
-        df["noches"] = pd.NA
+    # Campos estándar
+    rename_map = {
+        "Pais": "País",
+        "Idioma Cliente": "Idioma",
+        "Provincia Cliente": "Provincia"
+    }
+
+    df = df.rename(columns=rename_map)
+
+    return df
