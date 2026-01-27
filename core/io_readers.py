@@ -1,7 +1,7 @@
 import pandas as pd
 
 
-def read_file(file) -> pd.DataFrame:
+def read_any(file) -> pd.DataFrame:
     name = file.name.lower()
 
     if name.endswith(".csv"):
