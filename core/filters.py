@@ -1,29 +1,35 @@
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
-def sidebar_filters(d: pd.DataFrame) -> dict:
-    st.sidebar.header("Filtros")
 
-    paises = sorted([x for x in d["País"].unique().tolist() if x])
-    provincias = sorted([x for x in d["Provincia"].unique().tolist() if x])
-    idiomas = sorted([x for x in d["Idioma"].unique().tolist() if x])
-    portales = sorted([x for x in d["Portal"].unique().tolist() if x])
+def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
 
-    f = {}
-    f["pais"] = st.sidebar.multiselect("País", paises)
-    f["provincia"] = st.sidebar.multiselect("Provincia", provincias)
-    f["idioma"] = st.sidebar.multiselect("Idioma", idiomas)
-    f["portal"] = st.sidebar.multiselect("Portal", portales)
-    return f
+    st.sidebar.subheader("Filtros")
 
-def apply_filters(d: pd.DataFrame, f: dict) -> pd.DataFrame:
-    out = d.copy()
-    if f.get("pais"):
-        out = out[out["País"].isin(f["pais"])]
-    if f.get("provincia"):
-        out = out[out["Provincia"].isin(f["provincia"])]
-    if f.get("idioma"):
-        out = out[out["Idioma"].isin(f["idioma"])]
-    if f.get("portal"):
-        out = out[out["Portal"].isin(f["portal"])]
-    return out
+    # Fecha
+    if "Fecha entrada" in d.columns and pd.api.types.is_datetime64_any_dtype(d["Fecha entrada"]):
+        min_dt = d["Fecha entrada"].min()
+        max_dt = d["Fecha entrada"].max()
+        if pd.notna(min_dt) and pd.notna(max_dt):
+            start, end = st.sidebar.date_input(
+                "Rango de fechas (Fecha entrada)",
+                value=(min_dt.date(), max_dt.date()),
+            )
+            d = d[(d["Fecha entrada"].dt.date >= start) & (d["Fecha entrada"].dt.date <= end)]
+
+    def multiselect(col: str, label: str):
+        if col in d.columns:
+            opts = sorted([x for x in d[col].dropna().unique().tolist() if str(x).strip() != ""])
+            sel = st.sidebar.multiselect(label, opts)
+            if sel:
+                return d[d[col].isin(sel)]
+        return d
+
+    d = multiselect("País", "País")
+    d = multiselect("Provincia", "Provincia")
+    d = multiselect("Idioma", "Idioma")
+    d = multiselect("Portal", "Portal")
+    d = multiselect("Alojamiento", "Alojamiento")
+
+    return d
