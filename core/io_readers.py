@@ -1,75 +1,28 @@
-from __future__ import annotations
-
-import io
-import csv
 import pandas as pd
 
 
-def _get_bytes(file) -> bytes:
-    # Streamlit UploadedFile tiene getvalue()
-    if hasattr(file, "getvalue"):
-        return file.getvalue()
-    # fallback
-    data = file.read()
-    return data if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8", errors="ignore")
-
-
-def _guess_delimiter(sample: str) -> str:
-    # Heurística rápida
-    counts = {
-        ";": sample.count(";"),
-        ",": sample.count(","),
-        "\t": sample.count("\t"),
-        "|": sample.count("|"),
-    }
-    delim = max(counts, key=counts.get)
-    # Si todo 0, intenta sniffer
-    if counts[delim] == 0:
-        try:
-            dialect = csv.Sniffer().sniff(sample)
-            return dialect.delimiter
-        except Exception:
-            return ","
-    return delim
-
-
-def read_any(file) -> pd.DataFrame:
+def read_any(file):
     """
-    Lee CSV/XLS/XLSX desde Streamlit UploadedFile con máxima robustez.
+    Lee CSV/XLS/XLSX desde Streamlit uploader.
+    - CSV: intenta varios encodings y detecta separador
+    - Excel: read_excel
     """
-    name = getattr(file, "name", "") or ""
-    low = name.lower()
+    name = (getattr(file, "name", "") or "").lower()
 
-    # Excel
-    if low.endswith(".xlsx") or low.endswith(".xls"):
+    if name.endswith((".xlsx", ".xls")):
         return pd.read_excel(file)
 
-    # CSV / texto
-    raw = _get_bytes(file)
-
-    # Intentos de encoding
+    # CSV / TXT
     encodings = ["utf-8-sig", "utf-8", "cp1252", "latin1"]
     last_err = None
-
     for enc in encodings:
         try:
-            text = raw.decode(enc)
-            # muestra inicial para delim
-            sample = "\n".join(text.splitlines()[:20])
-            delim = _guess_delimiter(sample)
-
-            # read_csv desde StringIO
-            return pd.read_csv(
-                io.StringIO(text),
-                sep=delim,
-                engine="python",
-            )
+            return pd.read_csv(file, sep=None, engine="python", encoding=enc)
         except Exception as e:
             last_err = e
-            continue
+            try:
+                file.seek(0)
+            except Exception:
+                pass
 
-    # Último intento: pandas con sep auto (puede fallar, pero por lo menos lo intenta)
-    try:
-        return pd.read_csv(io.BytesIO(raw), sep=None, engine="python", encoding_errors="ignore")
-    except Exception:
-        raise last_err if last_err else RuntimeError("No se pudo leer el archivo.")
+    raise last_err
