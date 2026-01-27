@@ -2,30 +2,23 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-from core.formatting import eur, nint, pct
 
-
-# ==========
-# AJUSTA AQUÍ (si tus columnas se llaman diferente)
-# ==========
 COL_PAIS = "País"
-COL_PROVINCIA = "Provincia"
+COL_PROV = "Provincia"
 COL_IDIOMA = "Idioma"
 
-# Pon aquí el nombre EXACTO de tu columna dinero (la que suma ingresos).
-# Ejemplos típicos: "Total ingresos", "Importe", "Revenue", "Total reserva"
 COL_INGRESOS = "Total ingresos"
-
-# Si tienes noches, pon su nombre exacto. Si no existe, deja None.
 COL_NOCHES = "Noches"
 
 
-def _safe_col(df: pd.DataFrame, col: str | None) -> bool:
-    return (col is not None) and (col in df.columns)
+def _safe_series(df: pd.DataFrame, col: str) -> pd.Series:
+    if col in df.columns:
+        return df[col]
+    return pd.Series([pd.NA] * len(df))
 
 
-def _top_counts(df: pd.DataFrame, col: str, n=15) -> pd.DataFrame:
-    s = df[col].replace("", pd.NA).dropna()
+def _top_count(df: pd.DataFrame, col: str, n: int = 15) -> pd.DataFrame:
+    s = _safe_series(df, col).replace("", pd.NA).dropna()
     if s.empty:
         return pd.DataFrame({col: [], "Reservas": []})
     t = s.value_counts().head(n).reset_index()
@@ -33,135 +26,123 @@ def _top_counts(df: pd.DataFrame, col: str, n=15) -> pd.DataFrame:
     return t
 
 
-def _top_sum(df: pd.DataFrame, group_col: str, value_col: str, n=15) -> pd.DataFrame:
+def _top_sum(df: pd.DataFrame, group_col: str, value_col: str, n: int = 15, out_name: str = "Ingresos") -> pd.DataFrame:
+    if group_col not in df.columns or value_col not in df.columns:
+        return pd.DataFrame({group_col: [], out_name: []})
+
     d = df[[group_col, value_col]].copy()
-    d = d.dropna(subset=[group_col, value_col])
+    d = d.dropna(subset=[group_col])
+    d[value_col] = pd.to_numeric(d[value_col], errors="coerce")
+    d = d.dropna(subset=[value_col])
+
     if d.empty:
-        return pd.DataFrame({group_col: [], "Ingresos": []})
-    t = d.groupby(group_col, as_index=False)[value_col].sum()
-    t = t.sort_values("Ingresos", ascending=False).head(n)
+        return pd.DataFrame({group_col: [], out_name: []})
+
+    t = d.groupby(group_col, dropna=True)[value_col].sum().sort_values(ascending=False).head(n).reset_index()
+    t.columns = [group_col, out_name]
     return t
+
+
+def _top_adr(df: pd.DataFrame, group_col: str, ingresos_col: str, noches_col: str, n: int = 15) -> pd.DataFrame:
+    if group_col not in df.columns or ingresos_col not in df.columns or noches_col not in df.columns:
+        return pd.DataFrame({group_col: [], "ADR": []})
+
+    d = df[[group_col, ingresos_col, noches_col]].copy()
+    d = d.dropna(subset=[group_col])
+    d[ingresos_col] = pd.to_numeric(d[ingresos_col], errors="coerce")
+    d[noches_col] = pd.to_numeric(d[noches_col], errors="coerce")
+    d = d.dropna(subset=[ingresos_col, noches_col])
+    d = d[d[noches_col] > 0]
+
+    if d.empty:
+        return pd.DataFrame({group_col: [], "ADR": []})
+
+    agg = d.groupby(group_col, dropna=True).agg(
+        Ingresos=(ingresos_col, "sum"),
+        Noches=(noches_col, "sum"),
+        Reservas=(group_col, "size"),
+    ).reset_index()
+
+    agg["ADR"] = agg["Ingresos"] / agg["Noches"]
+    agg = agg.sort_values("ADR", ascending=False).head(n)
+
+    return agg[[group_col, "ADR", "Ingresos", "Noches", "Reservas"]]
 
 
 def render_mercados(d: pd.DataFrame):
     st.subheader("Mercados (Marketing)")
 
-    # ==========
-    # KPIs BASE
-    # ==========
-    reservas = len(d)
+    # KPIs (si existen columnas de dinero/noches)
+    ingresos_total = pd.to_numeric(_safe_series(d, COL_INGRESOS), errors="coerce").sum(skipna=True) if COL_INGRESOS in d.columns else None
+    noches_total = pd.to_numeric(_safe_series(d, COL_NOCHES), errors="coerce").sum(skipna=True) if COL_NOCHES in d.columns else None
+    reservas_total = len(d)
 
-    ingresos_total = None
-    if _safe_col(d, COL_INGRESOS):
-        ingresos_total = float(pd.to_numeric(d[COL_INGRESOS], errors="coerce").fillna(0).sum())
-
-    adr = None
-    if _safe_col(d, COL_INGRESOS) and _safe_col(d, COL_NOCHES):
-        ingresos_num = pd.to_numeric(d[COL_INGRESOS], errors="coerce").fillna(0).sum()
-        noches_num = pd.to_numeric(d[COL_NOCHES], errors="coerce").fillna(0).sum()
-        adr = (ingresos_num / noches_num) if noches_num else None
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Reservas", nint(reservas))
-    c2.metric("Ingresos", eur(ingresos_total) if ingresos_total is not None else "—")
-    c3.metric("ADR", eur(adr) if adr is not None else "—")
-    c4.metric("Países activos", nint(d[COL_PAIS].nunique()) if _safe_col(d, COL_PAIS) else "—")
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.metric("Reservas", f"{reservas_total:,}".replace(",", "."))
+    with k2:
+        if ingresos_total is None or pd.isna(ingresos_total):
+            st.metric("Ingresos", "—")
+        else:
+            st.metric("Ingresos", f"{ingresos_total:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
+    with k3:
+        if noches_total is None or pd.isna(noches_total):
+            st.metric("Noches", "—")
+        else:
+            st.metric("Noches", f"{int(noches_total):,}".replace(",", "."))
+    with k4:
+        if ingresos_total is None or noches_total is None or noches_total == 0 or pd.isna(noches_total):
+            st.metric("ADR", "—")
+        else:
+            adr = ingresos_total / noches_total
+            st.metric("ADR", f"{adr:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
 
     st.divider()
 
-    # ==========
-    # BLOQUE 1: VOLUMEN (lo que ya tenías)
-    # ==========
-    st.markdown("### Volumen (quién nos visita)")
-
+    # 3 gráficos "reservas" (los que ya tenías)
     c1, c2, c3 = st.columns(3)
 
     with c1:
-        st.caption("Top País (reservas)")
-        if _safe_col(d, COL_PAIS):
-            tp = _top_counts(d, COL_PAIS, 15)
-            st.plotly_chart(px.bar(tp, x="Reservas", y=COL_PAIS, orientation="h"), use_container_width=True)
-        else:
-            st.info("No existe columna País.")
+        st.caption("Top País (Reservas)")
+        tp = _top_count(d, COL_PAIS, 15)
+        st.plotly_chart(px.bar(tp, x="Reservas", y=COL_PAIS, orientation="h"), use_container_width=True)
 
     with c2:
-        st.caption("Top Provincia (reservas)")
-        if _safe_col(d, COL_PROVINCIA):
-            tv = _top_counts(d, COL_PROVINCIA, 15)
-            st.plotly_chart(px.bar(tv, x="Reservas", y=COL_PROVINCIA, orientation="h"), use_container_width=True)
-        else:
-            st.info("No existe columna Provincia.")
+        st.caption("Top Provincia (Reservas)")
+        tv = _top_count(d, COL_PROV, 15)
+        st.plotly_chart(px.bar(tv, x="Reservas", y=COL_PROV, orientation="h"), use_container_width=True)
 
     with c3:
-        st.caption("Top Idioma (reservas)")
-        if _safe_col(d, COL_IDIOMA):
-            ti = _top_counts(d, COL_IDIOMA, 15)
-            st.plotly_chart(px.bar(ti, x="Reservas", y=COL_IDIOMA, orientation="h"), use_container_width=True)
-        else:
-            st.info("No existe columna Idioma.")
+        st.caption("Top Idioma (Reservas)")
+        ti = _top_count(d, COL_IDIOMA, 15)
+        st.plotly_chart(px.bar(ti, x="Reservas", y=COL_IDIOMA, orientation="h"), use_container_width=True)
 
     st.divider()
 
-    # ==========
-    # BLOQUE 2: VALOR (dinero)
-    # ==========
-    st.markdown("### Valor (quién nos deja más dinero)")
+    # 2 gráficos de dinero (si existen columnas)
+    if (COL_INGRESOS in d.columns) and (pd.to_numeric(d[COL_INGRESOS], errors="coerce").notna().any()):
+        c4, c5 = st.columns(2)
 
-    if not _safe_col(d, COL_INGRESOS):
-        st.warning(f"No encuentro la columna de ingresos '{COL_INGRESOS}'. Cámbiala arriba en COL_INGRESOS.")
-        st.stop()
+        with c4:
+            st.caption("Top País (Ingresos)")
+            t_ing = _top_sum(d, COL_PAIS, COL_INGRESOS, 15, out_name="Ingresos")
+            st.plotly_chart(px.bar(t_ing, x="Ingresos", y=COL_PAIS, orientation="h"), use_container_width=True)
 
-    # Top País por ingresos
-    c1, c2 = st.columns(2)
-    with c1:
-        st.caption("Top País (ingresos)")
-        if _safe_col(d, COL_PAIS):
-            tpi = _top_sum(d, COL_PAIS, COL_INGRESOS, 15)
-            st.plotly_chart(px.bar(tpi, x="Ingresos", y=COL_PAIS, orientation="h"), use_container_width=True)
-        else:
-            st.info("No existe columna País.")
-
-    # Dependencia top 1 / top 3 (muy útil marketing)
-    with c2:
-        st.caption("Dependencia de mercados (ingresos)")
-        if _safe_col(d, COL_PAIS):
-            tot = pd.to_numeric(d[COL_INGRESOS], errors="coerce").fillna(0).sum()
-            share = (
-                d.groupby(COL_PAIS)[COL_INGRESOS]
-                .sum()
-                .sort_values(ascending=False)
-            )
-            top1 = (share.iloc[0] / tot) if tot and len(share) >= 1 else None
-            top3 = (share.iloc[:3].sum() / tot) if tot and len(share) >= 3 else None
-            st.metric("% ingresos Top 1 país", pct(top1) if top1 is not None else "—")
-            st.metric("% ingresos Top 3 países", pct(top3) if top3 is not None else "—")
-        else:
-            st.info("No existe columna País.")
-
-    # ADR por país (si hay noches)
-    if _safe_col(d, COL_PAIS) and _safe_col(d, COL_NOCHES):
-        st.caption("ADR por país (filtrable por mínimo de reservas)")
-        min_res = st.slider("Mínimo de reservas", 1, 50, 5)
-
-        tmp = d[[COL_PAIS, COL_INGRESOS, COL_NOCHES]].copy()
-        tmp[COL_INGRESOS] = pd.to_numeric(tmp[COL_INGRESOS], errors="coerce")
-        tmp[COL_NOCHES] = pd.to_numeric(tmp[COL_NOCHES], errors="coerce")
-
-        g = tmp.groupby(COL_PAIS, as_index=False).agg(
-            Ingresos=(COL_INGRESOS, "sum"),
-            Noches=(COL_NOCHES, "sum"),
-            Reservas=(COL_PAIS, "size"),
-        )
-        g = g[g["Reservas"] >= min_res].copy()
-        g["ADR"] = g["Ingresos"] / g["Noches"].replace(0, pd.NA)
-        g = g.dropna(subset=["ADR"]).sort_values("ADR", ascending=False).head(20)
-
-        st.plotly_chart(px.bar(g, x="ADR", y=COL_PAIS, orientation="h"), use_container_width=True)
+        with c5:
+            st.caption("ADR por País (Ingresos / Noches)")
+            if (COL_NOCHES in d.columns) and (pd.to_numeric(d[COL_NOCHES], errors="coerce").notna().any()):
+                t_adr = _top_adr(d, COL_PAIS, COL_INGRESOS, COL_NOCHES, 15)
+                # Mostramos ADR (con hover de ingresos/noches)
+                if not t_adr.empty:
+                    fig = px.bar(t_adr, x="ADR", y=COL_PAIS, orientation="h", hover_data=["Ingresos", "Noches", "Reservas"])
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No hay datos suficientes para ADR (revisa fechas de entrada/salida).")
+            else:
+                st.info("Falta la columna 'Noches'. Asegúrate de que cleaning.py esté actualizado.")
+    else:
+        st.info("No se detectaron ingresos. Revisa que la columna M del Excel sea 'Total reserva…' (o similar).")
 
     st.divider()
-
-    # ==========
-    # TABLA MARKETING (exportable)
-    # ==========
     st.caption("Muestra de datos (post-filtro)")
-    st.dataframe(d.head(200), use_container_width=True)
+    st.dataframe(d.head(200))
