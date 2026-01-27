@@ -1,224 +1,207 @@
 from __future__ import annotations
 
-import pandas as pd
-import unicodedata
 import re
+import numpy as np
+import pandas as pd
 
 
-# -----------------------
-# Utilidades
-# -----------------------
-def _norm(s: str) -> str:
-    if s is None:
-        return ""
-    s = str(s).strip().lower().replace("\ufeff", "")
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(ch for ch in s if not unicodedata.combining(ch))
-    s = re.sub(r"[^a-z0-9\s:/_-]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
+def _fix_mojibake(s: str) -> str:
+    """
+    Arregla textos típicos rotos por encoding: EspaÃ±a -> España, PaÃ­s -> País, etc.
+    Si no aplica, devuelve el string original.
+    """
+    if not isinstance(s, str) or not s:
+        return s
+    try:
+        # caso típico: texto UTF-8 leído como latin1/cp1252
+        repaired = s.encode("latin1", errors="ignore").decode("utf-8", errors="ignore")
+        if repaired and repaired != s:
+            return repaired
+    except Exception:
+        pass
     return s
 
 
-def _fix_mojibake(x: str) -> str:
-    """
-    Arregla casos tipo 'EspaÃ±a' -> 'España' si viene por CSV mal decodificado.
-    Si no aplica, devuelve igual.
-    """
-    if not isinstance(x, str):
-        return x
-    if "Ã" in x or "Â" in x:
-        try:
-            return x.encode("latin1").decode("utf-8")
-        except Exception:
-            return x
-    return x
+def _norm_colname(c: str) -> str:
+    c = _fix_mojibake(str(c))
+    c = c.strip()
+    c = re.sub(r"\s+", " ", c)
+    return c
 
 
-def _find_col_by_name(df: pd.DataFrame, patterns: list[str]) -> str | None:
-    for c in df.columns:
-        nc = _norm(c)
-        for pat in patterns:
-            if re.search(pat, nc):
-                return c
+def _normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [_norm_colname(c) for c in df.columns]
+
+    # arreglar valores en columnas objeto
+    for col in df.select_dtypes(include=["object"]).columns:
+        df[col] = df[col].map(_fix_mojibake)
+    return df
+
+
+def _pick_first_existing(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    for c in candidates:
+        if c in df.columns:
+            return c
     return None
 
 
-def _date_like_score(series: pd.Series) -> int:
-    s = pd.to_datetime(series, errors="coerce", dayfirst=True)
-    return int(s.notna().sum())
+def _to_datetime_series(s: pd.Series) -> pd.Series:
+    # dayfirst=True porque tus fechas suelen ser dd/mm/yyyy
+    return pd.to_datetime(s, errors="coerce", dayfirst=True)
 
 
-def _pick_date_columns_by_content(df: pd.DataFrame) -> tuple[str | None, str | None]:
-    # Evalúa todas las columnas y se queda con las 2 más "date-like"
-    scores = []
-    for c in df.columns:
-        try:
-            score = _date_like_score(df[c])
-        except Exception:
-            score = 0
-        scores.append((score, c))
-
-    scores.sort(reverse=True, key=lambda x: x[0])
-    if not scores or scores[0][0] == 0:
-        return None, None
-
-    c1 = scores[0][1]
-    c2 = None
-    for score, c in scores[1:]:
-        if c != c1 and score > 0:
-            c2 = c
-            break
-
-    if not c2:
-        return c1, None
-
-    # Decide cuál es entrada/salida por mediana: entrada suele ser menor
-    d1 = pd.to_datetime(df[c1], errors="coerce", dayfirst=True)
-    d2 = pd.to_datetime(df[c2], errors="coerce", dayfirst=True)
-
-    m1 = d1.dropna().median() if d1.notna().any() else None
-    m2 = d2.dropna().median() if d2.notna().any() else None
-
-    if m1 is not None and m2 is not None:
-        if m1 <= m2:
-            return c1, c2
-        return c2, c1
-
-    # fallback: por nombre
-    if re.search(r"\bentr", _norm(c1)) or re.search(r"\bcheck in\b", _norm(c1)):
-        return c1, c2
-    if re.search(r"\bsalid|\bcheck out\b", _norm(c1)):
-        return c2, c1
-
-    return c1, c2
+def _to_number_series(s: pd.Series) -> pd.Series:
+    """
+    Convierte números con coma/punto y símbolos €.
+    """
+    if s is None:
+        return pd.Series(dtype="float64")
+    s = s.astype(str)
+    s = s.str.replace("€", "", regex=False).str.replace("\xa0", " ", regex=False).str.strip()
+    # si viene "9.775.712" o "9,775,712"
+    s = s.str.replace(".", "", regex=False)  # quita miles
+    s = s.str.replace(",", ".", regex=False)  # coma decimal -> punto
+    return pd.to_numeric(s, errors="coerce")
 
 
-def _pick_income_column(df: pd.DataFrame) -> str | None:
-    # 1) Por nombre (preferencias típicas)
-    name_patterns = [
-        r"\btotal\b.*\breserv",
-        r"\bimporte\b",
-        r"\btotal\b",
-        r"\bingres",
-        r"\bprecio\b",
-    ]
-    c = _find_col_by_name(df, name_patterns)
-    if c:
-        return c
-
-    # 2) Por contenido: columna numérica con mayor suma positiva
-    best = None
-    best_score = None
-    for c in df.columns:
-        try:
-            s = pd.to_numeric(df[c], errors="coerce")
-            score = float(s.fillna(0).clip(lower=0).sum())
-            nonnull = int(s.notna().sum())
-            # penaliza si casi todo es NaN
-            if nonnull < max(10, int(len(df) * 0.05)):
-                continue
-            if best_score is None or score > best_score:
-                best_score = score
-                best = c
-        except Exception:
-            continue
-    return best
-
-
-# -----------------------
-# Cleaners principales
-# -----------------------
 def clean_lista_reservas(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Archivo 'LISTA_RESERVAS': suele traer País/Provincia/Idioma/Portal, etc.
-    Normalizamos texto y arreglamos mojibake.
+    Excel 1: "Lista reservas"
+    Columnas clave (según tu descripción):
+    - Localizador
+    - Fecha alta
+    - Fecha entrada
+    - Fecha salida
+    - Alojamiento (o Nombre del alojamiento)
+    - Total reserva (€) (puede venir como 'Total reserva (â‚¬)')
     """
-    df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
+    df = _normalize_dataframe(df)
 
-    # Arregla texto en columnas object
-    for c in df.columns:
-        if df[c].dtype == "object":
-            df[c] = df[c].map(_fix_mojibake)
+    col_localizador = _pick_first_existing(df, ["Localizador", "Localizador agente", "Localizador agente "])
+    col_aloj = _pick_first_existing(df, ["Alojamiento", "Nombre alojamiento", "Nombre del alojamiento"])
+    col_alta = _pick_first_existing(df, ["Fecha alta", "Fecha creación", "Fecha reserva"])
+    col_in = _pick_first_existing(df, ["Fecha entrada", "Entrada"])
+    col_out = _pick_first_existing(df, ["Fecha salida", "Salida"])
+    col_ing = _pick_first_existing(
+        df,
+        ["Total reserva (€)", "Total reserva (€)", "Total reserva", "Total reserva (â‚¬)", "Total reserva (EUR)"],
+    )
 
-    # Renombra variantes conocidas si aparecen
-    rename_map = {}
-    for c in df.columns:
-        nc = _norm(c)
-        if re.search(r"\bpais\b", nc):
-            rename_map[c] = "País"
-        elif re.search(r"\bprovincia\b", nc):
-            rename_map[c] = "Provincia"
-        elif re.search(r"\bidioma\b|\blanguage\b", nc):
-            rename_map[c] = "Idioma"
-        elif re.search(r"\bportal\b|\bcanal\b|\borigen\b", nc):
-            rename_map[c] = "Portal"
+    out = pd.DataFrame()
+    if not col_localizador:
+        raise ValueError("❌ En 'Lista reservas' no encuentro la columna 'Localizador'.")
 
-    df = df.rename(columns=rename_map)
-    return df
+    out["Localizador"] = df[col_localizador].astype(str).str.strip()
+
+    if col_aloj:
+        out["Alojamiento"] = df[col_aloj].astype(str).str.strip()
+    if col_alta:
+        out["Fecha alta"] = _to_datetime_series(df[col_alta])
+    if col_in:
+        out["Fecha entrada"] = _to_datetime_series(df[col_in])
+    if col_out:
+        out["Fecha salida"] = _to_datetime_series(df[col_out])
+
+    if col_ing:
+        out["Ingreso"] = _to_number_series(df[col_ing])
+    else:
+        out["Ingreso"] = np.nan  # se podrá completar desde el Excel 2 si existe
+
+    return out
 
 
 def clean_listado_reservas(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Archivo 'LISTADO_RESERVAS': aquí sacamos Fecha entrada/salida, Noches, Ingresos, ADR.
-    - No depende SOLO de nombres: si hace falta, detecta por CONTENIDO.
-    - Nunca revienta la app: si no puede, deja NaT/0 y sigue.
+    Excel 2: "Listado de reservas"
+    Columnas relevantes:
+    - Localizador
+    - Fecha alta
+    - Fecha entrada / Fecha salida
+    - noches
+    - Adultos, Niños, Bebés
+    - Nombre alojamiento
+    - Cliente: País
+    - Ocupante: Provincia
+    - Ocupante: País
+    - Ocupante: Idioma del cliente
+    - Portal
+    - (opcional) Total reserva con tasas (si un día quieres usarlo)
     """
-    df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
+    df = _normalize_dataframe(df)
 
-    # Arregla mojibake en texto
-    for c in df.columns:
-        if df[c].dtype == "object":
-            df[c] = df[c].map(_fix_mojibake)
+    col_localizador = _pick_first_existing(df, ["Localizador"])
+    if not col_localizador:
+        raise ValueError("❌ En 'Listado de reservas' no encuentro la columna 'Localizador'.")
 
-    # 1) Intento por nombre
-    entrada_patterns = [r"\bfecha\b.*\bentr", r"\bcheck\s*in\b", r"\bllegada\b", r"\binicio\b"]
-    salida_patterns = [r"\bfecha\b.*\bsalid", r"\bcheck\s*out\b", r"\bfin\b"]
+    col_alta = _pick_first_existing(df, ["Fecha alta"])
+    col_in = _pick_first_existing(df, ["Fecha entrada"])
+    col_out = _pick_first_existing(df, ["Fecha salida"])
+    col_noches = _pick_first_existing(df, ["noches", "Noches"])
+    col_adultos = _pick_first_existing(df, ["Adultos"])
+    col_ninos = _pick_first_existing(df, ["Niños", "NiÃ±os"])
+    col_bebes = _pick_first_existing(df, ["Bebés", "BebÃ©s"])
+    col_aloj = _pick_first_existing(df, ["Nombre alojamiento", "Alojamiento", "Nombre del alojamiento"])
+    col_pais_cliente = _pick_first_existing(df, ["Cliente: País", "Cliente: PaÃ­s"])
+    col_pais_ocup = _pick_first_existing(df, ["Ocupante: País", "Ocupante: PaÃ­s"])
+    col_prov = _pick_first_existing(df, ["Ocupante: Provincia", "Provincia"])
+    col_idioma = _pick_first_existing(df, ["Ocupante: Idioma del cliente", "Idioma del cliente"])
+    col_portal = _pick_first_existing(df, ["Portal"])
+    col_total_con_tasas = _pick_first_existing(df, ["Total reserva con tasas", "Total reserva con tasas "])
 
-    col_in = _find_col_by_name(df, entrada_patterns)
-    col_out = _find_col_by_name(df, salida_patterns)
+    out = pd.DataFrame()
+    out["Localizador"] = df[col_localizador].astype(str).str.strip()
 
-    # 2) Si falta algo, intento por contenido
-    if not col_in or not col_out:
-        cin2, cout2 = _pick_date_columns_by_content(df)
-        col_in = col_in or cin2
-        col_out = col_out or cout2
+    if col_alta:
+        out["Fecha alta"] = _to_datetime_series(df[col_alta])
+    if col_in:
+        out["Fecha entrada"] = _to_datetime_series(df[col_in])
+    if col_out:
+        out["Fecha salida"] = _to_datetime_series(df[col_out])
 
-    # 3) Fechas
-    df["Fecha entrada"] = pd.to_datetime(df[col_in], errors="coerce", dayfirst=True) if col_in else pd.NaT
-    df["Fecha salida"] = pd.to_datetime(df[col_out], errors="coerce", dayfirst=True) if col_out else pd.NaT
-
-    # 4) Noches
-    if col_in and col_out:
-        df["Noches"] = (df["Fecha salida"] - df["Fecha entrada"]).dt.days
-        df["Noches"] = df["Noches"].fillna(0).clip(lower=0).astype(int)
+    # noches: si existe lo uso, si no lo calculo
+    if col_noches:
+        out["Noches"] = pd.to_numeric(df[col_noches], errors="coerce")
     else:
-        df["Noches"] = 0
+        out["Noches"] = np.nan
 
-    # 5) Ingresos
-    col_income = _pick_income_column(df)
-    df["Ingresos"] = pd.to_numeric(df[col_income], errors="coerce") if col_income else pd.NA
+    if col_adultos:
+        out["Adultos"] = pd.to_numeric(df[col_adultos], errors="coerce")
+    if col_ninos:
+        out["Niños"] = pd.to_numeric(df[col_ninos], errors="coerce")
+    if col_bebes:
+        out["Bebés"] = pd.to_numeric(df[col_bebes], errors="coerce")
 
-    # 6) ADR
-    df["ADR"] = df["Ingresos"] / df["Noches"].replace({0: pd.NA})
-    df["ADR"] = df["ADR"].fillna(0)
+    if col_aloj:
+        out["Alojamiento"] = df[col_aloj].astype(str).str.strip()
 
-    # 7) Normalizar País/Provincia/Idioma/Portal si existen
-    rename_map = {}
-    for c in df.columns:
-        nc = _norm(c)
-        if c in ["País", "Provincia", "Idioma", "Portal"]:
-            continue
-        if re.search(r"\bpais\b", nc):
-            rename_map[c] = "País"
-        elif re.search(r"\bprovincia\b", nc):
-            rename_map[c] = "Provincia"
-        elif re.search(r"\bidioma\b|\blanguage\b", nc):
-            rename_map[c] = "Idioma"
-        elif re.search(r"\bportal\b|\bcanal\b|\borigen\b", nc):
-            rename_map[c] = "Portal"
+    # País: prioriza Cliente: País; si no, Ocupante: País
+    pais = None
+    if col_pais_cliente:
+        pais = df[col_pais_cliente]
+    if col_pais_ocup:
+        pais = df[col_pais_ocup] if pais is None else pais.fillna(df[col_pais_ocup])
+    if pais is not None:
+        out["País"] = pais.astype(str).str.strip().replace({"": np.nan})
 
-    df = df.rename(columns=rename_map)
+    if col_prov:
+        out["Provincia"] = df[col_prov].astype(str).str.strip().replace({"": np.nan})
 
-    return df
+    if col_idioma:
+        out["Idioma"] = df[col_idioma].astype(str).str.strip().replace({"": np.nan})
+
+    if col_portal:
+        out["Portal"] = df[col_portal].astype(str).str.strip().replace({"": np.nan})
+
+    # (Opcional) ingreso alternativo desde listado si algún día lo quieres
+    if col_total_con_tasas:
+        out["Ingreso_listado"] = _to_number_series(df[col_total_con_tasas])
+    else:
+        out["Ingreso_listado"] = np.nan
+
+    # Si no hay noches, intento calcularlas si hay fechas
+    if "Fecha entrada" in out.columns and "Fecha salida" in out.columns:
+        calc = (out["Fecha salida"] - out["Fecha entrada"]).dt.days
+        out["Noches"] = out["Noches"].fillna(calc)
+
+    return out
