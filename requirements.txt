@@ -1,7 +1,0 @@
-streamlit
-pandas
-openpyxl
-plotly
-xlrd
-lxml
-html5lib
