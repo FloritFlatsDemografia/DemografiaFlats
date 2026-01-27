@@ -1,0 +1,33 @@
+# core/formatting.py
+from __future__ import annotations
+
+def _to_float(x):
+    try:
+        if x is None:
+            return None
+        if isinstance(x, str):
+            x = x.replace("€", "").replace(" ", "")
+            x = x.replace(".", "").replace(",", ".")
+        return float(x)
+    except Exception:
+        return None
+
+def eur(x) -> str:
+    v = _to_float(x)
+    if v is None:
+        return "—"
+    s = f"{v:,.2f}"
+    s = s.replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"{s} €"
+
+def nint(x) -> str:
+    v = _to_float(x)
+    if v is None:
+        return "—"
+    return f"{int(round(v)):,}".replace(",", ".")
+
+def pct(x, decimals: int = 1) -> str:
+    v = _to_float(x)
+    if v is None:
+        return "—"
+    return f"{v*100:.{decimals}f}%".replace(".", ",")
