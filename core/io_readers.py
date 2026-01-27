@@ -1,28 +1,47 @@
 import pandas as pd
 
 
-def read_any(file):
+def _read_csv_robust(file) -> pd.DataFrame:
     """
-    Lee CSV/XLS/XLSX desde Streamlit uploader.
-    - CSV: intenta varios encodings y detecta separador
-    - Excel: read_excel
+    Lee CSV con múltiples encodings y separadores (sin que explote en Streamlit Cloud).
     """
-    name = (getattr(file, "name", "") or "").lower()
+    # Streamlit uploader puede volver a usarse varias veces: reseteamos puntero
+    try:
+        file.seek(0)
+    except Exception:
+        pass
 
-    if name.endswith((".xlsx", ".xls")):
-        return pd.read_excel(file)
-
-    # CSV / TXT
-    encodings = ["utf-8-sig", "utf-8", "cp1252", "latin1"]
+    encodings = ["utf-8", "utf-8-sig", "cp1252", "latin1"]
     last_err = None
+
     for enc in encodings:
         try:
+            file.seek(0)
+            # sep=None + engine python intenta autodetectar delimitador
             return pd.read_csv(file, sep=None, engine="python", encoding=enc)
         except Exception as e:
             last_err = e
-            try:
-                file.seek(0)
-            except Exception:
-                pass
 
     raise last_err
+
+
+def _read_excel_robust(file) -> pd.DataFrame:
+    try:
+        file.seek(0)
+    except Exception:
+        pass
+    return pd.read_excel(file, engine="openpyxl")
+
+
+def read_any(file) -> pd.DataFrame:
+    """
+    Acepta CSV / XLS / XLSX. Devuelve DataFrame.
+    """
+    name = (getattr(file, "name", "") or "").lower()
+    if name.endswith(".csv"):
+        return _read_csv_robust(file)
+    if name.endswith(".xls") or name.endswith(".xlsx"):
+        return _read_excel_robust(file)
+
+    # fallback: intenta CSV
+    return _read_csv_robust(file)
